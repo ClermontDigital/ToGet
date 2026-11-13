@@ -5,7 +5,7 @@
  * Colours come from the Home Assistant theme; set --to-get-accent to change the accent (or --tg-accent on ha-card,
  * from card-mod). The count strip also takes --tg-glow, --tg-name-size, --tg-name-transform and --tg-name-spacing.
  */
-const TG_VERSION = "0.1.1";
+const TG_VERSION = "0.2.0";
 
 const TG_OFFLINE = "Couldn't reach Home Assistant. Check the connection and try again.";
 const TG_STARTING = "Waiting for To Get to load in Home Assistant…";
@@ -16,6 +16,26 @@ const TG_MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep"
 const tgEsc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const tgClean = (s) => String(s ?? "").split(/\s+/).filter(Boolean).join(" ");
 const tgFold = (s) => tgClean(s).toLowerCase();
+// A place as it's matched: case, spaces and punctuation don't count ("K-mart" is Kmart, "big w" is Big W).
+const tgPlaceKey = (s) => tgFold(s).replace(/[^\p{L}\p{N}]/gu, "");
+const tgOptionKey = (o) => `${o.isNew ? "+" : ""}${tgPlaceKey(o.value)}`;
+// How many letters apart two words are (one added, dropped, changed, or two swapped is one), up to `max` + 1.
+const tgEdits = (a, b, max) => {
+  if (Math.abs(a.length - b.length) > max) return max + 1;
+  let before = null; let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    const row = [i];
+    let least = i;
+    for (let j = 1; j <= b.length; j++) {
+      row[j] = Math.min(prev[j] + 1, row[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+      if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) row[j] = Math.min(row[j], before[j - 2] + 1);
+      least = Math.min(least, row[j]);
+    }
+    if (least > max) return max + 1;
+    before = prev; prev = row;
+  }
+  return prev[b.length];
+};
 // Home Assistant's connection rejects with a bare number when the socket is down.
 const tgMessage = (err) => (err && typeof err === "object" && err.message ? String(err.message) : TG_OFFLINE);
 const tgDay = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate());
@@ -90,6 +110,9 @@ class ToGetCard extends HTMLElement {
     this._showGot = false;
     this._armed = null;       // "delete:<uid>" or "clear": tapped once, waiting for the second tap
     this._undo = null;        // the thing just ticked off, for a moment
+    this._combo = null;       // the place list under a place box: { field, open, typed, filtering, pick, moved, chosenNew }
+    this._suggested = null;   // a place put in for what was typed, asking about it: { field, from, to }
+    this._pad = 0;            // room added under the list so a place list fits in the card
     this._seq = 0;
     const root = this.shadowRoot;
     // The frame is built once, here, and only its inside is ever redrawn. card-mod and themes put their styling
@@ -103,6 +126,10 @@ class ToGetCard extends HTMLElement {
     root.addEventListener("submit", (ev) => { ev.preventDefault(); if (ev.target.dataset.act === "add-form") this._addFromForm(); else this._save(); });
     root.addEventListener("input", (ev) => this._onInput(ev));
     root.addEventListener("keydown", (ev) => this._onKey(ev));
+    root.addEventListener("focusin", (ev) => this._onFocusIn(ev));
+    root.addEventListener("focusout", (ev) => this._onFocusOut(ev));
+    // A click on the list of places (a place, or its scrollbar) leaves the focus, and a phone's keyboard, in the box.
+    root.addEventListener("mousedown", (ev) => { if (ev.target.closest?.(".opts")) ev.preventDefault(); });
     // Redrawing while a finger is down on a button would swallow the tap, so a redraw waits for the release.
     root.addEventListener("pointerdown", () => { this._pressing = true; });
     this._release = () => {
@@ -111,6 +138,7 @@ class ToGetCard extends HTMLElement {
     };
     this._ready = () => { this._dropSubscription(); this._retries = 0; this._retryAt = 0; this._subscribe(); };
     this._down = () => { this._unsub = null; };   // the subscription went with the connection
+    this._onResize = () => { if (this.shadowRoot.querySelector(".opts")) this._fitOptions(); };
   }
 
   setConfig(config) {
@@ -126,6 +154,8 @@ class ToGetCard extends HTMLElement {
       this._local = null;
       this._editing = null;
       this._filter = null;
+      this._combo = null;
+      this._suggested = null;
       this._retries = 0;
       this._retryAt = 0;
       if (this._hass) this._subscribe();
@@ -187,6 +217,7 @@ class ToGetCard extends HTMLElement {
   }
 
   connectedCallback() {
+    window.addEventListener("resize", this._onResize);
     window.addEventListener("pointerup", this._release, true);
     window.addEventListener("pointercancel", this._release, true);
     if (this._hass) { this._watch(null, this._hass.connection); this._subscribe(); }
@@ -194,12 +225,15 @@ class ToGetCard extends HTMLElement {
   }
 
   disconnectedCallback() {
+    window.removeEventListener("resize", this._onResize);
+    if (this._combo) this._combo.open = false;   // its closing timer is about to be cancelled
     window.removeEventListener("pointerup", this._release, true);
     window.removeEventListener("pointercancel", this._release, true);
     this._watch(this._hass?.connection, null);
     clearTimeout(this._retryTimer);
     clearTimeout(this._undoTimer);
     clearTimeout(this._armTimer);
+    clearTimeout(this._comboTimer);
     this._undo = null;    // their timers are gone, so they'd stay up for good
     this._armed = null;
     this._pressing = false;
@@ -347,18 +381,131 @@ class ToGetCard extends HTMLElement {
     return place ? `${place} (last time)` : "Where from?";
   }
 
+  // Places --------------------------------------------------------------------------------------------
+  // The place boxes ("place" in the add form, "e-place" in the editor) offer the places used so far, so the same
+  // shop isn't added twice under two names.
+
+  // What the list under a place box offers. Just opened (or nothing typed): every place used so far, the busiest
+  // first. Once something's typed: the places like it, the closest first (Woolies for "wool", "Woolworths" or
+  // "Wooolies"), then, unless it's one already, a new place. Each is { value, isNew, at }, `at` being where the
+  // typed text is in it.
+  _placeOptions(typed, filtering) {
+    const places = this._view()?.places || [];
+    const t = tgFold(typed);
+    const tk = tgPlaceKey(typed);
+    if (!filtering || !t) return places.map((value) => ({ value, isNew: false, at: -1 }));
+    const word = (s) => s.split(" ")[0];
+    const common = (a, b) => { let n = 0; while (n < a.length && a[n] === b[n]) n += 1; return n; };
+    const found = [];
+    places.forEach((value, i) => {
+      const p = tgFold(value);
+      const pk = tgPlaceKey(value);
+      const typos = Math.min(pk.length, tk.length) >= 8 ? 2 : Math.min(pk.length, tk.length) >= 4 ? 1 : 0;
+      let rank = -1; let at = -1;
+      if (pk === tk) { rank = 0; at = p === t ? 0 : -1; }
+      else if (p.startsWith(t)) { rank = 1; at = 0; }
+      else if (p.includes(` ${t}`)) { rank = 2; at = p.indexOf(` ${t}`) + 1; }
+      else if (p.includes(t)) { rank = 3; at = p.indexOf(t); }
+      // A near miss: a typo or two, the same start ("Woolworths" for Woolies), or more than the place.
+      else if ((typos && tgEdits(pk, tk, typos) <= typos) || common(word(p), word(t)) >= 4 || t.startsWith(`${p} `)) rank = 4;
+      if (rank >= 0) found.push({ value, isNew: false, at: p.length === value.length ? at : -1, rank, i });
+    });
+    found.sort((a, b) => a.rank - b.rank || a.i - b.i);
+    const options = found.map(({ value, isNew, at }) => ({ value, isNew, at }));
+    if (!found.length || found[0].rank) options.push({ value: tgClean(typed), isNew: true, at: -1 });
+    return options;
+  }
+
+  _comboFor(field) { return this._combo?.field === field ? this._combo : null; }
+
+  // Where the picked place is in a list of options (-1: none). It's kept by name, so a list that changes order
+  // (another device adds something) still has the same place picked.
+  _pickIndex(c, options) { return c?.pick == null ? -1 : options.findIndex((o) => tgOptionKey(o) === c.pick); }
+
+  // What a place box's text comes to when it's added or saved. A place used before, however it's typed, is that
+  // place. Other text is a new place when that's what's picked in the list, or when nothing like it has been used;
+  // otherwise the closest place is put in the box (`fill`) for a second Add or Save to use.
+  _resolvePlace(field) {
+    const box = this.shadowRoot.querySelector(`[data-field="${field}"]`);
+    const typed = tgClean(box?.value);
+    const c = this._comboFor(field);
+    const options = c ? this._placeOptions(c.typed, c.filtering) : [];
+    const at = c && tgFold(c.typed) === tgFold(typed) ? this._pickIndex(c, options) : -1;
+    const picked = at >= 0 ? options[at] : null;
+    if (picked && !picked.isNew && tgPlaceKey(picked.value) !== tgPlaceKey(typed)) return { fill: picked.value, guessed: !!typed && !c.moved };
+    if (!typed) return { place: null };
+    const same = (this._view()?.places || []).find((p) => tgPlaceKey(p) === tgPlaceKey(typed));
+    if (same) return { place: same };
+    if (picked?.isNew || c?.chosenNew === tgPlaceKey(typed)) return { place: typed };
+    const best = this._placeOptions(typed, true)[0];
+    return best.isNew ? { place: typed } : { fill: best.value, guessed: true };
+  }
+
+  // Puts a place in the box, closing its list. A guess (the closest to what was typed) asks about it under the box.
+  _fillPlace(field, value, guessedFrom = null) {
+    const box = this.shadowRoot.querySelector(`[data-field="${field}"]`);
+    if (!box) return;
+    box.value = value;
+    if (field === "e-place") this._draft.place = value;
+    this._combo = { field, open: false, typed: value, filtering: false, pick: tgPlaceKey(value) };
+    this._suggested = guessedFrom ? { field, from: guessedFrom, to: value } : null;
+    this._render();
+  }
+
+  // A place tapped in the list (or a new one).
+  _choose(field, index) {
+    const c = this._comboFor(field);
+    const option = c && this._placeOptions(c.typed, c.filtering)[index];
+    const box = this.shadowRoot.querySelector(`[data-field="${field}"]`);
+    if (!option || !box) return;
+    clearTimeout(this._comboTimer);
+    if (option.isNew) {
+      Object.assign(c, { open: false, pick: tgOptionKey(option), chosenNew: tgPlaceKey(option.value) });
+      box.value = option.value;
+      if (field === "e-place") this._draft.place = option.value;
+      this._suggested = null;
+      this._render();
+      this._say(`${option.value} will be a new place.`);
+    } else {
+      this._fillPlace(field, option.value);
+      this._say(`From ${option.value}.`);
+    }
+    if (this.shadowRoot.activeElement !== box) { this._quietFocus = true; box.focus(); this._quietFocus = false; }
+  }
+
+  // "Did you mean Woolies?" answered no: what was typed is a new place, and it's added (or saved) with it.
+  _keepNew(field) {
+    const s = this._suggested;
+    const box = this.shadowRoot.querySelector(`[data-field="${field}"]`);
+    if (!s || s.field !== field || !box) return;
+    this._suggested = null;
+    box.value = s.from;
+    if (field === "e-place") this._draft.place = s.from;
+    this._combo = { field, open: false, typed: s.from, filtering: true, pick: `+${tgPlaceKey(s.from)}`, chosenNew: tgPlaceKey(s.from) };
+    if (field === "place") this._addFromForm(); else this._save();
+  }
+
   async _addFromForm() {
     const root = this.shadowRoot;
     const nameBox = root.querySelector('[data-field="summary"]');
     const placeBox = root.querySelector('[data-field="place"]');
     const summary = tgClean(nameBox?.value);
     if (!summary) { nameBox?.focus(); this._say("Type what's needed first."); return; }
-    const typed = tgClean(placeBox?.value);
+    const resolved = this._resolvePlace("place");
+    if (resolved.fill) {
+      const typed = tgClean(placeBox.value);
+      this._fillPlace("place", resolved.fill, resolved.guessed ? typed : null);
+      this._say(resolved.guessed ? `Did you mean ${resolved.fill}? Add again to use it.` : `From ${resolved.fill}. Add again to add it.`);
+      return;
+    }
+    const typed = resolved.place;
     const msg = { type: "to_get/add", summary };
     const { place, from } = this._placeFor(summary);
     if (typed) msg.place = typed;
     else if (from === "filter") msg.place = place;
-    const before = { name: nameBox.value, place: placeBox.value };
+    const before = { name: nameBox.value, place: placeBox.value, combo: this._combo };
+    this._combo = null;
+    this._suggested = null;
     nameBox.value = "";
     placeBox.value = "";
     placeBox.placeholder = this._placeHint();
@@ -380,7 +527,12 @@ class ToGetCard extends HTMLElement {
     });
     if (!result) {
       // Not saved: give back what was typed, unless something new has been typed since.
-      if (!nameBox.value && !placeBox.value) { nameBox.value = before.name; placeBox.value = before.place; placeBox.placeholder = this._placeHint(); }
+      if (!nameBox.value && !placeBox.value) {
+        nameBox.value = before.name;
+        placeBox.value = before.place;
+        placeBox.placeholder = this._placeHint();
+        if (!this._combo && before.combo) this._combo = { ...before.combo, open: false };   // a new place picked stays picked
+      }
       return;
     }
     const { item, how } = result;
@@ -435,6 +587,8 @@ class ToGetCard extends HTMLElement {
     this._draft = { summary: item.summary, place: item.place || "", notes: item.notes || "" };
     this._opened = { ...this._draft };   // as it was when opened: what someone else changes meanwhile is left alone
     this._armed = null;
+    this._combo = null;
+    this._suggested = null;
     this._render();
     this.shadowRoot.querySelector('[data-field="e-summary"]')?.focus();
   }
@@ -443,6 +597,8 @@ class ToGetCard extends HTMLElement {
     const uid = this._editing;
     this._editing = null;
     this._armed = null;
+    if (this._combo?.field === "e-place") this._combo = null;
+    if (this._suggested?.field === "e-place") this._suggested = null;
     this._render();
     this.shadowRoot.querySelector(`[data-act="edit"][data-uid="${CSS.escape(uid || "")}"]`)?.focus();
   }
@@ -451,6 +607,14 @@ class ToGetCard extends HTMLElement {
     const uid = this._editing;
     const item = this._view()?.items.find((i) => i.uid === uid);
     if (!item) { this._closeEditor(); return; }
+    const resolved = this._resolvePlace("e-place");
+    if (resolved.fill) {
+      const typed = tgClean(this._draft.place);
+      this._fillPlace("e-place", resolved.fill, resolved.guessed ? typed : null);
+      this._say(resolved.guessed ? `Did you mean ${resolved.fill}? Save again to use it.` : `From ${resolved.fill}. Save again to save it.`);
+      return;
+    }
+    if (resolved.place) this._draft.place = resolved.place;
     const d = { summary: tgClean(this._draft.summary), place: tgClean(this._draft.place), notes: String(this._draft.notes || "").trim() };
     if (!d.summary) { this._say("Type what's needed first."); this.shadowRoot.querySelector('[data-field="e-summary"]')?.focus(); return; }
     const was = this._opened || {};
@@ -514,19 +678,91 @@ class ToGetCard extends HTMLElement {
     else if (act === "clear") this._clear();
     else if (act === "undo" && this._undo) { const { uid: u } = this._undo; this._undo = null; this._tick(u, false); }
     else if (act === "dismiss") { this._error = null; this._render(); }
+    else if (act === "opt") this._choose(el.dataset.for, Number(el.dataset.i));
+    else if (act === "keep-new") this._keepNew(el.dataset.for);
   }
 
   _onInput(ev) {
     const field = ev.target.dataset?.field;
-    if (field === "summary") {
+    if (field === "place" || field === "e-place") {
+      if (field === "e-place") this._draft.place = ev.target.value;
+      const typed = ev.target.value;
+      const first = tgClean(typed) ? this._placeOptions(typed, true)[0] : null;
+      this._combo = { field, open: true, typed, filtering: true, pick: first ? tgOptionKey(first) : null };
+      if (this._suggested?.field === field) this._suggested = null;
+      this._render();
+    } else if (field === "summary") {
       const box = this.shadowRoot.querySelector('[data-field="place"]');
       if (box) box.placeholder = this._placeHint();
     } else if (field?.startsWith("e-")) this._draft[field.slice(2)] = ev.target.value;
   }
 
   _onKey(ev) {
+    const field = ev.target.dataset?.field;
+    const placeBox = field === "place" || field === "e-place";
+    if (placeBox && (ev.key === "ArrowDown" || ev.key === "ArrowUp")) {
+      ev.preventDefault();
+      let c = this._comboFor(field);
+      if (!c) c = this._combo = this._comboAt(field, ev.target.value);
+      const options = this._placeOptions(c.typed, c.filtering);
+      if (!options.length || !this._view()?.places.length) return;
+      if (!c.open) { c.open = true; if (this._suggested?.field === field) this._suggested = null; }
+      else {
+        const at = this._pickIndex(c, options);
+        const next = ev.key === "ArrowDown" ? Math.min(at + 1, options.length - 1) : Math.max(at - 1, c.filtering && tgClean(c.typed) ? 0 : -1);
+        c.pick = next >= 0 ? tgOptionKey(options[next]) : null;
+        c.moved = true;
+      }
+      this._render();
+      this.shadowRoot.getElementById(`tg-opt-${field}-${this._pickIndex(c, options)}`)?.scrollIntoView({ block: "nearest" });
+      return;
+    }
+    if (placeBox && ev.key === "Escape" && this._comboOptions(field)) {
+      ev.preventDefault();
+      Object.assign(this._combo, { open: false, pick: null, moved: false });
+      this._render();
+      return;
+    }
+    // Enter on a place in the list picks it, as a tap does, and waits for Add (or Save). On a new place, it's
+    // picked and the form goes on: Add adds with it.
+    if (placeBox && ev.key === "Enter" && !ev.isComposing) {
+      const options = this._comboOptions(field);
+      const at = options ? this._pickIndex(this._combo, options) : -1;
+      const option = at >= 0 ? options[at] : null;
+      if (option && !option.isNew && tgPlaceKey(option.value) !== tgPlaceKey(ev.target.value)) { ev.preventDefault(); this._choose(field, at); return; }
+      if (option?.isNew) this._choose(field, at);
+    }
     if (ev.key === "Escape" && this._editing && ev.target.closest?.(".editor")) { ev.preventDefault(); this._closeEditor(); }
     else if ((ev.key === "Enter" || ev.key === " ") && ev.target.dataset?.act === "go") { ev.preventDefault(); this._go(); }
+  }
+
+  // A place box just focused: its list opens with every place, the one in the box (if any) picked.
+  _comboAt(field, typed) {
+    const same = (this._view()?.places || []).find((p) => tgPlaceKey(p) === tgPlaceKey(typed));
+    return { field, open: true, typed, filtering: false, pick: same ? tgPlaceKey(same) : null };
+  }
+
+  _onFocusIn(ev) {
+    const field = ev.target.dataset?.field;
+    if (field !== "place" && field !== "e-place") return;
+    clearTimeout(this._comboTimer);
+    if (this._quietFocus) { this._quietFocus = false; return; }   // focus put back after a place was picked
+    if (this._suggested?.field === field) return;   // "Did you mean …?" stays in view: typing opens the list
+    const c = this._comboFor(field);
+    if (c && tgFold(c.typed) === tgFold(ev.target.value)) { if (!c.open) { c.open = true; this._render(); } return; }
+    this._combo = this._comboAt(field, ev.target.value);
+    this._render();
+  }
+
+  _onFocusOut(ev) {
+    const field = ev.target.dataset?.field;
+    if (field !== "place" && field !== "e-place") return;
+    clearTimeout(this._comboTimer);
+    // Not straight away: a tap on a place blurs the box first on some phones, and the list has to be there for it.
+    this._comboTimer = setTimeout(() => {
+      const c = this._comboFor(field);
+      if (c?.open && this.shadowRoot.activeElement?.dataset?.field !== field) { c.open = false; this._render(); }
+    }, 250);
   }
 
   // Drawing ----------------------------------------------------------------------------------------
@@ -540,6 +776,28 @@ class ToGetCard extends HTMLElement {
     next.innerHTML = html;
     this._main.classList.toggle("count-view", this._config.view === "count");
     tgMorph(this._main, next);
+    this._fitOptions();
+  }
+
+  // The list of places floats over what's under its box, so it needs a solid fill: the card's own (a theme's or
+  // card-mod's) over the page colour, as a see-through card would let the dashboard show through. And as a card
+  // cuts off whatever reaches past its edge, a card too short for the list grows to fit it.
+  _fitOptions() {
+    const list = this.shadowRoot.querySelector(".opts");
+    if (!list) {
+      if (this._pad) { this._pad = 0; this._main.style.paddingBottom = ""; }
+      return;
+    }
+    const card = this.shadowRoot.querySelector("ha-card");
+    const look = getComputedStyle(card);
+    const layers = ["linear-gradient(rgba(127, 127, 127, .1), rgba(127, 127, 127, .1))",
+      look.backgroundImage !== "none" ? look.backgroundImage : "",
+      look.backgroundColor !== "rgba(0, 0, 0, 0)" ? `linear-gradient(${look.backgroundColor}, ${look.backgroundColor})` : ""];
+    list.style.backgroundImage = layers.filter(Boolean).join(", ");
+    list.style.backgroundColor = getComputedStyle(this).getPropertyValue("--primary-background-color").trim() || "#111";
+    const short = list.getBoundingClientRect().bottom + 12 - (card.getBoundingClientRect().bottom - this._pad);
+    this._pad = Math.max(0, Math.ceil(short));
+    this._main.style.paddingBottom = this._pad ? `${12 + this._pad}px` : "";
   }
 
   _status(text, kind = "note") { return `<p class="${kind}" ${kind === "err" ? 'role="alert"' : ""}>${tgEsc(text)}</p>`; }
@@ -589,12 +847,12 @@ class ToGetCard extends HTMLElement {
     if (this._gone) html += this._status(TG_GONE, "err");
     if (canChange) {
       const names = v.names.map((n) => `<option value="${tgEsc(n.name)}"></option>`).join("");
-      const places = v.places.map((p) => `<option value="${tgEsc(p)}"></option>`).join("");
       html += `<form class="add" data-act="add-form" autocomplete="off">`
         + `<input class="f-summary" data-field="summary" list="tg-names" placeholder="What do we need?" aria-label="What do we need?" enterkeyhint="done" maxlength="120" autocapitalize="sentences">`
-        + `<input class="f-place" data-field="place" list="tg-places" placeholder="${tgEsc(this._placeHint())}" aria-label="Where it's coming from (optional)" enterkeyhint="done" maxlength="60" autocapitalize="words">`
+        + `<div class="combo" data-key="combo-place"><input class="f-place" data-field="place" ${this._comboAttrs("place")} placeholder="${tgEsc(this._placeHint())}" aria-label="Where it's coming from (optional)" enterkeyhint="done" maxlength="60" autocapitalize="words">`
+        + `${this._optionsHtml("place")}</div>`
         + `<button class="addbtn" type="submit" data-key="add">Add</button>`
-        + `<datalist id="tg-names">${names}</datalist><datalist id="tg-places">${places}</datalist></form>`;
+        + `<datalist id="tg-names">${names}</datalist></form>` + this._hintHtml("place");
     } else html += this._status(TG_READ_ONLY);
     if (placed && items.length > 1) html += this._chipsHtml(items);
     if (!items.length) html += `<p class="empty">Nothing to get.${canChange ? " Add what you need above." : ""}</p>`;
@@ -609,6 +867,52 @@ class ToGetCard extends HTMLElement {
     }
     if (!c.hide_got && v.got.length) html += this._gotHtml(v.got, canChange);
     return html;
+  }
+
+  // The place box is a combobox: its list of places is drawn under it while it's open.
+  _comboOptions(field) {
+    const c = this._comboFor(field);
+    if (!c?.open || !this._view()?.places.length) return null;
+    const options = this._placeOptions(c.typed, c.filtering);
+    return options.length ? options : null;
+  }
+
+  _comboAttrs(field) {
+    const c = this._comboFor(field);
+    const open = !!this._comboOptions(field);
+    return `role="combobox" aria-autocomplete="list" aria-expanded="${open}"`
+      + (open ? ` aria-controls="tg-opts-${field}"` : "")
+      + (open && this._pickIndex(c, this._comboOptions(field)) >= 0 ? ` aria-activedescendant="tg-opt-${field}-${this._pickIndex(c, this._comboOptions(field))}"` : "");
+  }
+
+  _optionsHtml(field) {
+    const options = this._comboOptions(field);
+    if (!options) return "";
+    const c = this._combo;
+    const t = tgFold(c.typed).length;
+    const picked = this._pickIndex(c, options);
+    const counts = new Map();
+    for (const i of this._view().items) if (i.place) counts.set(tgFold(i.place), (counts.get(tgFold(i.place)) || 0) + 1);
+    return `<ul class="opts" role="listbox" id="tg-opts-${field}" aria-label="Places used before" data-key="opts-${field}">` + options.map((o, i) => {
+      let inner;
+      if (o.isNew) inner = `<ha-icon icon="mdi:plus"></ha-icon><span class="grow">New place “${tgEsc(o.value)}”</span>`;
+      else {
+        const name = o.at >= 0 && t
+          ? `${tgEsc(o.value.slice(0, o.at))}<b>${tgEsc(o.value.slice(o.at, o.at + t))}</b>${tgEsc(o.value.slice(o.at + t))}` : tgEsc(o.value);
+        const n = counts.get(tgFold(o.value));
+        inner = `<span class="grow">${name}</span>${n ? `<span class="n" aria-hidden="true">${n}</span><span class="vh">, ${tgEsc(tgThings(n))} on the list</span>` : ""}`;
+      }
+      return `<li class="opt${o.isNew ? " new" : ""}" role="option" id="tg-opt-${field}-${i}" aria-selected="${i === picked}" data-act="opt" `
+        + `data-for="${field}" data-i="${i}" data-key="o:${tgEsc(tgFold(o.value))}${o.isNew ? ":new" : ""}">${inner}</li>`;
+    }).join("") + `</ul>`;
+  }
+
+  // After Add (or Save) put the closest place in for what was typed: say so, and offer what was typed as a new place.
+  _hintHtml(field) {
+    const s = this._suggested;
+    if (s?.field !== field) return "";
+    return `<p class="hint" data-key="hint-${field}"><span>Did you mean ${tgEsc(s.to)}? ${field === "place" ? "Add" : "Save"} again to use it.</span>`
+      + `<button type="button" class="link" data-act="keep-new" data-for="${field}">Use “${tgEsc(s.from)}” as a new place</button></p>`;
   }
 
   _chipsHtml(items) {
@@ -627,7 +931,7 @@ class ToGetCard extends HTMLElement {
   }
 
   _groupsHtml(items, grouped) {
-    if (!grouped) return `<div class="groups"><ul class="list" data-key="flat">${items.map((i) => this._itemHtml(i, this._filter === null)).join("")}</ul></div>`;
+    if (!grouped) return `<div class="groups flat"><ul class="list" data-key="flat">${items.map((i) => this._itemHtml(i, this._filter === null)).join("")}</ul></div>`;
     const groups = new Map();
     for (const i of items) {
       const k = tgFold(i.place);
@@ -663,7 +967,8 @@ class ToGetCard extends HTMLElement {
     const meta = [i.added ? `Added ${tgAgo(i.added)}` : "", i.added_by ? `by ${i.added_by}` : ""].filter(Boolean).join(" ");
     return `<li class="item editing" data-uid="${tgEsc(i.uid)}" data-key="editor"><form class="editor" data-act="edit-form" autocomplete="off">`
       + `<label>What<input data-field="e-summary" value="${tgEsc(d.summary)}" maxlength="120" enterkeyhint="done"></label>`
-      + `<label>From<input data-field="e-place" list="tg-places" value="${tgEsc(d.place)}" placeholder="Anywhere" maxlength="60" enterkeyhint="done"></label>`
+      + `<div class="combo" data-key="combo-e-place"><label>From<input data-field="e-place" ${this._comboAttrs("e-place")} value="${tgEsc(d.place)}" placeholder="Anywhere" maxlength="60" enterkeyhint="done" autocapitalize="words"></label>`
+      + `${this._optionsHtml("e-place")}</div>${this._hintHtml("e-place")}`
       + `<label>Notes<textarea data-field="e-notes" rows="2" placeholder="Size, brand, how many" maxlength="500">${tgEsc(d.notes)}</textarea></label>`
       + (meta ? `<p class="meta">${tgEsc(meta)}</p>` : "")
       + `<div class="row"><button type="button" class="danger${armed ? " armed" : ""}" data-act="delete" data-uid="${tgEsc(i.uid)}">${armed ? "Tap again to remove" : "Remove"}</button>`
@@ -730,20 +1035,42 @@ class ToGetCard extends HTMLElement {
         .f-summary { grid-column: 1 / -1; }
       }
 
+      /* The places under a place box, over what's below it (its fill is set to match the card's). */
+      .combo { position: relative; min-width: 0; }
+      .opts { position: absolute; z-index: 3; top: calc(100% + 4px); left: 0; right: 0; list-style: none; margin: 0; padding: 4px;
+        border: 1px solid var(--accent); border-radius: 8px; background: var(--card-background-color, #1c1c1c);
+        box-shadow: 0 10px 28px rgba(0, 0, 0, .45); max-height: 228px; overflow-y: auto; overscroll-behavior: contain; }
+      .opt { display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 0 10px; border-radius: 6px; cursor: pointer;
+        -webkit-tap-highlight-color: transparent; }
+      .opt .grow { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .opt b { font-weight: 700; color: var(--accent); }
+      .opt[aria-selected="true"] { background: rgba(127, 127, 127, .2); background: color-mix(in srgb, var(--accent) 22%, transparent);
+        box-shadow: inset 3px 0 0 var(--accent); }
+      @media (hover: hover) { .opt:hover:not([aria-selected="true"]) { background: rgba(127, 127, 127, .12); } }
+      .opt.new { color: var(--muted); }
+      .opt.new ha-icon { --mdc-icon-size: 18px; flex: none; }
+      .hint { display: flex; flex-wrap: wrap; align-items: center; column-gap: 4px; margin: -6px 0 8px; font-size: 14px; }
+      .hint .link { padding: 0 6px; }
+      .editor .hint { margin: -4px 0 0; }
+
       .chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 6px; }
       .chip { min-height: 34px; padding: 0 12px; border-radius: 17px; border: 1px solid var(--line); font-size: 13px; display: inline-flex; align-items: center; gap: 6px; }
       .chip .n { color: var(--muted); font-variant-numeric: tabular-nums; }
       .chip[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--tg-on-accent, #081C16); }
       .chip[aria-pressed="true"] .n { color: inherit; opacity: .75; }
 
-      .groups { margin-top: 2px; }
+      /* Space goes under each place, not over it: a column's top margin is dropped, which left the columns' first
+         places out of line. */
+      .groups { margin-top: 8px; }
+      .groups.flat { margin-top: 2px; }
       @container (min-width: 720px) {
         .groups { columns: 2; column-gap: 32px; }
         .group { break-inside: avoid; }
       }
-      .group h3 { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin: 12px 0 0; padding: 0 0 4px 44px;
+      .group { padding-bottom: 12px; }
+      .group:last-child { padding-bottom: 0; }
+      .group h3 { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin: 0; padding: 0 0 4px 44px;
         font-size: 13px; font-weight: 600; color: var(--accent); border-bottom: 1px solid var(--line); }
-      .group:first-child h3 { margin-top: 6px; }
       .n { color: var(--muted); font-weight: 400; font-variant-numeric: tabular-nums; }
       .list { list-style: none; margin: 0; padding: 0; }
       .item { display: grid; grid-template-columns: 44px minmax(0, 1fr); align-items: center; min-height: 44px; border-bottom: 1px solid var(--line); break-inside: avoid; }

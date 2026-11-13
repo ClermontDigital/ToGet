@@ -44,9 +44,9 @@ async function main() {
       };
     });
 
-    const open = async (qs = "theme=dark", w = 560, h = 1000, data = "demo") => {
+    const open = async (qs = "theme=dark", w = 560, h = 1000, data = "demo", touch = false) => {
       await fetch(`${BASE}/reset?data=${data}`);
-      await p.setViewport({ width: w, height: h, deviceScaleFactor: 2 });
+      await p.setViewport({ width: w, height: h, deviceScaleFactor: 2, isMobile: touch, hasTouch: touch });
       await p.goto(`${BASE}/?${qs}`, { waitUntil: "networkidle0" });
       await sleep(300);
     };
@@ -62,6 +62,10 @@ async function main() {
     };
     const groups = () => texts(".group h3 > span:first-child");
     const names = () => texts(".list:not(.gotlist) .item .name");
+    const offered = () => texts(".opts .opt .grow");
+    const picked = () => text('.opt[aria-selected="true"] .grow');
+    const valueOf = (field) => p.evaluate((f) => window.R().querySelector(`[data-field="${f}"]`).value, field);
+    const focusOn = async (field) => { await p.evaluate((f) => window.R().querySelector(`[data-field="${f}"]`).focus(), field); await sleep(100); };
     const shot = async (file) => { if (process.env.SHOTS !== "0") { const card = await p.$("to-get-card"); await card.screenshot({ path: path.join(IMAGES, file) }); } };
 
     // The list --------------------------------------------------------------------------------
@@ -296,6 +300,181 @@ async function main() {
     const silicone = await uidOf("Silicone");
     await tap(`.label[data-uid="${silicone}"]`);
     await shot("editing.png");
+
+    // Places: the list under a place box --------------------------------------------------------
+    await open("theme=dark");
+    await focusOn("place");
+    const known = await p.evaluate(() => window.card._data.places);
+    check("the place box lists the places used, busiest first", JSON.stringify(await offered()) === JSON.stringify(known)
+      && JSON.stringify(known.slice(0, 3)) === JSON.stringify(["Bunnings", "Woolies", "Online"]) && (await attr('[data-field="place"]', "aria-expanded")) === "true", JSON.stringify(await offered()));
+    check("... with how many things are from each", (await text('.opt[data-key="o:bunnings"] .n')) === "2" && !(await has('.opt[data-key="o:servo"] .n')));
+    await type('[data-field="place"]', "pro");
+    check("typing narrows it, with a new place last", JSON.stringify(await offered()) === JSON.stringify(["Produce store", "New place “pro”"]), JSON.stringify(await offered()));
+    check("... the typed part in bold, and the closest picked", (await text(".opt b")) === "Pro" && (await picked()) === "Produce store"
+      && (await attr('[data-field="place"]', "aria-activedescendant")) === "tg-opt-place-0");
+    await shot("places.png");
+    await type('[data-field="summary"]', "Chook feed");
+    await type('[data-field="place"]', "pro");
+    await p.keyboard.press("Enter");
+    await sleep(300);
+    check("Enter picks the closest place, and waits", (await valueOf("place")) === "Produce store" && !(await openItems()).some((i) => i.summary === "Chook feed"));
+    check("... without asking about it (it was picked)", !(await has(".hint")) && !(await has(".opts")));
+    await p.keyboard.press("Enter");
+    await sleep(350);
+    check("... and the second Add adds it there", (await openItems()).some((i) => i.summary === "Chook feed" && i.place === "Produce store") && !(await has(".hint")));
+
+    await type('[data-field="summary"]', "Flour");
+    await type('[data-field="place"]', "  woolies ");
+    await p.keyboard.press("Enter");
+    await sleep(350);
+    check("a place typed another way is that place, in one go", (await openItems()).some((i) => i.summary === "Flour" && i.place === "Woolies"));
+
+    await type('[data-field="summary"]', "Cheese");
+    await type('[data-field="place"]', "Woolworths");
+    check("a near miss offers the place it's like", JSON.stringify(await offered()) === JSON.stringify(["Woolies", "New place “Woolworths”"]), JSON.stringify(await offered()));
+    await tap(".addbtn");
+    check("... Add puts that place in instead of making a new one", (await valueOf("place")) === "Woolies" && !(await openItems()).some((i) => i.summary === "Cheese"));
+    check("... and offers what was typed as a new place", (await text('.hint [data-act="keep-new"]')) === "Use “Woolworths” as a new place"
+      && (await text(".hint span")) === "Did you mean Woolies? Add again to use it.");
+    await focusOn("place");
+    check("... going back to the box leaves the question in view", !(await has(".opts")) && (await has(".hint")));
+    await tap('.hint [data-act="keep-new"]', 350);
+    check("... which adds it there", (await openItems()).some((i) => i.summary === "Cheese" && i.place === "Woolworths") && !(await has(".hint")));
+
+    await type('[data-field="summary"]', "Butter");
+    await p.evaluate(() => { window.R().querySelector('[data-field="summary"]').focus(); window.R().querySelector('[data-field="place"]').value = "wool"; });
+    await tap(".addbtn");
+    check("text put in the place box without typing (autofill) is checked the same way", (await valueOf("place")) === "Woolies"
+      && (await text('.hint [data-act="keep-new"]')) === "Use “wool” as a new place" && !(await openItems()).some((i) => i.summary === "Butter"));
+    await tap(".addbtn", 350);
+    check("... and the second Add adds it there", (await openItems()).some((i) => i.summary === "Butter" && i.place === "Woolies"));
+
+    await type('[data-field="summary"]', "Grout");
+    await type('[data-field="place"]', "Bunings");
+    check("a typo offers the place it's nearly", (await picked()) === "Bunnings");
+    await tap(".addbtn");
+    await tap(".addbtn", 350);
+    check("... and Add twice adds it there", (await openItems()).some((i) => i.summary === "Grout" && i.place === "Bunnings"));
+    await type('[data-field="summary"]', "Filter cartridge");
+    await type('[data-field="place"]', "on-line");
+    await p.keyboard.press("Enter");
+    await sleep(350);
+    check("spacing and punctuation don't count: on-line is Online, in one go", (await openItems()).some((i) => i.summary === "Filter cartridge" && i.place === "Online"));
+    await p.evaluate(() => { window.R().querySelector('[data-field="summary"]').value = ""; });
+    await type('[data-field="place"]', "prod");
+    await p.keyboard.press("Enter");
+    await sleep(250);
+    check("Enter picks a place before anything's in the name box too", (await valueOf("place")) === "Produce store" && (await p.evaluate(() => window.R().activeElement?.dataset.field)) === "place");
+    await p.evaluate(() => { const b = window.R().querySelector('[data-field="place"]'); b.value = ""; b.dispatchEvent(new Event("input", { bubbles: true })); });
+
+    await type('[data-field="summary"]', "Fabric");
+    await type('[data-field="place"]', "Spotlight");
+    check("nothing like it: a new place is offered, and picked", JSON.stringify(await offered()) === JSON.stringify(["New place “Spotlight”"]) && (await picked()) === "New place “Spotlight”");
+    await p.keyboard.press("Enter");
+    await sleep(350);
+    check("... and one Add adds it there", (await openItems()).some((i) => i.summary === "Fabric" && i.place === "Spotlight"));
+
+    await type('[data-field="summary"]', "Nails");
+    await type('[data-field="place"]', "Bunnings Emerald");
+    check("more than a place offers that place first", (await picked()) === "Bunnings");
+    await p.keyboard.press("ArrowDown");
+    check("the arrow keys move down the list", (await picked()) === "New place “Bunnings Emerald”");
+    await p.keyboard.press("Enter");
+    await sleep(350);
+    check("... and Enter on a new place adds it there", (await openItems()).some((i) => i.summary === "Nails" && i.place === "Bunnings Emerald"));
+
+    await focusOn("place");
+    await p.keyboard.press("Escape");
+    check("Escape closes the list", !(await has(".opts")) && (await attr('[data-field="place"]', "aria-expanded")) === "false");
+    await p.keyboard.press("ArrowDown");
+    check("... and the down arrow opens it again", await has(".opts"));
+    await p.keyboard.type("onl");
+    await sleep(100);
+    const online = await p.evaluateHandle(() => window.R().querySelector('.opt[data-key="o:online"]'));
+    await online.click();
+    await sleep(300);
+    check("clicking a place puts it in the box and closes the list, keeping the focus", (await valueOf("place")) === "Online" && !(await has(".opts"))
+      && (await p.evaluate(() => window.R().activeElement?.dataset.field)) === "place");
+    await p.evaluate(() => window.R().querySelector('[data-field="summary"]').focus());
+    await sleep(400);
+    check("leaving the box closes the list", !(await has(".opts")));
+
+    const milkUid = await uidOf("Milk");
+    await tap(`.label[data-uid="${milkUid}"]`);
+    await focusOn("e-place");
+    check("the editor's place box lists the places, its own picked", (await picked()) === "Woolies" && (await has(".editor .opts")));
+    await p.keyboard.press("ArrowDown");
+    const next = await picked();
+    await p.keyboard.press("Enter");
+    await sleep(250);
+    check("... Enter on another puts it in without saving", (await valueOf("e-place")) === next && (await has(".editor")) && !(await has(".hint"))
+      && (await get("/store"))[0].items.find((i) => i.uid === milkUid).place === "Woolies", next);
+    await p.keyboard.press("ArrowDown");
+    await p.keyboard.press("Escape");
+    check("... Escape with the list open closes only the list", (await has(".editor")) && !(await has(".opts")));
+    await p.keyboard.press("Enter");
+    await sleep(350);
+    check("... and Save saves it", (await get("/store"))[0].items.find((i) => i.uid === milkUid).place === next && !(await has(".editor")));
+    await tap(`.label[data-uid="${milkUid}"]`);
+    await p.evaluate(() => { const el = window.R().querySelector('[data-field="e-place"]'); el.value = "spot"; el.dispatchEvent(new Event("input", { bubbles: true })); });
+    await tap('.editor [type="submit"]', 250);
+    check("the editor asks about part of a place too", (await valueOf("e-place")) === "Spotlight" && (await text(".editor .hint span")) === "Did you mean Spotlight? Save again to use it.");
+    await tap('.editor [type="submit"]', 350);
+    check("... and saves it with a second Save", (await get("/store"))[0].items.find((i) => i.uid === milkUid).place === "Spotlight");
+
+    // A short card: nothing to get, but six places used before.
+    await open("theme=navy", 560, 1000, "empty");
+    for (const place of ["Bunnings", "Woolies", "Online", "Produce store", "Servo", "Repco"]) {
+      await p.evaluate((pl) => window.elsewhere({ type: "to_get/add", entry_id: "demo", summary: `From ${pl}`, place: pl }), place);
+    }
+    for (const item of await openItems()) await p.evaluate((u) => window.elsewhere({ type: "to_get/update", entry_id: "demo", uid: u, done: true }), item.uid);
+    await sleep(300);
+    const shortCard = await p.evaluate(() => window.R().querySelector("ha-card").getBoundingClientRect().height);
+    await focusOn("place");
+    check("a short card grows to fit the list, which has a solid fill", await p.evaluate((before) => {
+      const r = window.R(); const card = r.querySelector("ha-card").getBoundingClientRect(); const list = r.querySelector(".opts");
+      const fill = getComputedStyle(list).backgroundColor;
+      return r.querySelectorAll(".opt").length === 6 && list.getBoundingClientRect().bottom <= card.bottom && card.height > before && !/rgba\(.*, 0\)$/.test(fill);
+    }, shortCard));
+    await p.evaluate(() => window.R().querySelector('[data-field="summary"]').focus());
+    await sleep(400);
+    check("... and back again when it closes", Math.abs((await p.evaluate(() => window.R().querySelector("ha-card").getBoundingClientRect().height)) - shortCard) < 1);
+
+    // The picked place is kept by name: another device's change that reorders the places doesn't change it.
+    await open("theme=dark");
+    const sil = await uidOf("Silicone");
+    await tap(`.label[data-uid="${sil}"]`);
+    await focusOn("e-place");
+    await p.evaluate(() => window.R().querySelector('[data-field="e-notes"]').focus());
+    for (const n of ["A", "B", "C"]) await p.evaluate((x) => window.elsewhere({ type: "to_get/add", entry_id: "demo", summary: `Thing ${x}`, place: "Online" }), n);
+    await sleep(300);
+    await p.evaluate(() => { const el = window.R().querySelector('[data-field="e-notes"]'); el.value = "100 ml"; el.dispatchEvent(new Event("input", { bubbles: true })); });
+    await tap('.editor [type="submit"]', 350);
+    const silNow = (await get("/store"))[0].items.find((i) => i.uid === sil);
+    check("the picked place stays put when the places reorder elsewhere", silNow.place === "Bunnings" && silNow.notes === "100 ml" && !(await has(".editor")), JSON.stringify(silNow));
+
+    await open("theme=dark&w=860", 900, 1000);
+    check("side by side, the columns' first places line up", await p.evaluate(() => {
+      const hs = [...window.R().querySelectorAll(".group h3")].map((h) => h.getBoundingClientRect());
+      const lefts = [...new Set(hs.map((r) => Math.round(r.left)))];
+      const tops = lefts.map((l) => Math.min(...hs.filter((r) => Math.round(r.left) === l).map((r) => r.top)));
+      return lefts.length === 2 && Math.abs(tops[0] - tops[1]) < 1;
+    }));
+
+    await open("theme=navy&w=340", 390, 900, "demo", true);
+    await focusOn("place");
+    await p.keyboard.type("wo");
+    await sleep(150);
+    check("on a phone the list sits under the place box, inside the card, with 44 px rows", await p.evaluate(() => {
+      const r = window.R(); const box = r.querySelector('[data-field="place"]').getBoundingClientRect(); const list = r.querySelector(".opts").getBoundingClientRect();
+      const card = r.querySelector("ha-card").getBoundingClientRect();
+      return list.top >= box.bottom - 6 && Math.abs(list.left - box.left) < 1 && list.right <= card.right
+        && [...r.querySelectorAll(".opt")].every((o) => o.getBoundingClientRect().height >= 44);
+    }));
+    const woolies = await p.evaluate(() => { const b = window.R().querySelector('.opt[data-key="o:woolies"]').getBoundingClientRect(); return { x: b.x + b.width / 2, y: b.y + b.height / 2 }; });
+    await p.touchscreen.tap(woolies.x, woolies.y);
+    await sleep(400);
+    check("... and a tap on a place puts it in the box", (await valueOf("place")) === "Woolies" && !(await has(".opts")));
 
     await open("theme=navy&w=340", 390, 900);
     check("at phone width nothing runs off the side", await p.evaluate(() => document.documentElement.scrollWidth <= innerWidth && [...window.R().querySelectorAll("input, button")].every((e) => e.getBoundingClientRect().right <= innerWidth)));

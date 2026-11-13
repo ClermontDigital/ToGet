@@ -16,7 +16,10 @@ The screenshots use made-up data.
 - **By place.** Things are grouped under the place they're coming from, and a tap on a place shows only
   that place's things, for when you're there. Things with no place sit under Anywhere.
 - **It remembers.** Something that's been on the list before comes back with the place it came from last
-  time, and the boxes suggest things and places you've used.
+  time, and the name box suggests things you've had.
+- **One name per place.** Where from? lists the places you've used. Type and it narrows to the closest; a place
+  typed another way ("woolies", "on-line") is that place, and one that's nearly a place you have ("Woolworths" or
+  "Wooolies", with Woolies on the list) asks "Did you mean Woolies?" before it makes a second one.
 - **No doubles.** Adding something that's already on the list points it out instead.
 - **Tick things off**, with an undo. What's been got is kept, folded away, until you clear it.
 - **A count strip** for any dashboard: how many things there are to get and the first few, linking to the list.
@@ -74,6 +77,17 @@ On the list, type what's needed in the first box and where it's coming from in t
 **Add**. Leave the place empty and something that's been on the list before takes the place it came from last
 time (the box shows which). While one place is picked, new things go to that place. Tap the circle to tick
 something off, and tap its name to change it, add notes, or remove it.
+
+The place box opens a list of the places you've used, the busiest first, with how many things are from each.
+Typing narrows it, closest first, with the typed part in bold; pick one with a tap, or the arrow keys and Enter.
+A place you've used is matched however it's typed: case, spaces and punctuation don't count. Typing that's a
+letter or two off a place, starts the same, or adds to it ("Bunnings Emerald") lists that place first. Anything else
+becomes a new place only when you pick
+**New place** at the bottom of the list, or when nothing you've used is like it. Otherwise Add puts the closest
+place in the box and asks "Did you mean …?": Add again to use it, or **Use "…" as a new place** to keep what you
+typed. The From box when changing a thing works the same way.
+
+<img src="https://raw.githubusercontent.com/ClermontDigital/ToGet/main/images/places.png" alt="The place box with pro typed, and the list under it: Produce store, with Pro in bold and picked, then New place pro" width="300">
 
 <p>
   <img src="https://raw.githubusercontent.com/ClermontDigital/ToGet/main/images/editing.png" alt="A thing opened for changing: What, From and Notes boxes, when it was added and by whom, and Remove, Cancel and Save buttons; below it the list, and the things got, struck through, with where they came from and when" width="300">
