@@ -27,14 +27,18 @@
     "mdi:chevron-right": "M8.59,16.58L13.17,12L8.59,7.41L10,6L16,12L10,18L8.59,16.58Z",
     "mdi:chevron-down": "M7.41,8.58L12,13.17L16.59,8.58L18,10L12,16L6,10L7.41,8.58Z",
   };
+  // Styled from its own shadow root, as Home Assistant's is, so the card's own CSS (display: none) wins over it.
   customElements.define("ha-icon", class extends HTMLElement {
     static get observedAttributes() { return ["icon"]; }
+    constructor() {
+      super();
+      this.attachShadow({ mode: "open" });
+    }
     connectedCallback() { this.draw(); }
     attributeChangedCallback() { this.draw(); }
     draw() {
-      const size = "var(--mdc-icon-size, 24px)";
-      this.style.cssText = `display:inline-flex;width:${size};height:${size}`;
-      this.innerHTML = `<svg viewBox="0 0 24 24" width="100%" height="100%"><path fill="currentColor" d="${ICONS[this.getAttribute("icon")] || ""}"/></svg>`;
+      this.shadowRoot.innerHTML = "<style>:host{display:inline-flex;width:var(--mdc-icon-size,24px);height:var(--mdc-icon-size,24px)}</style>"
+        + `<svg viewBox="0 0 24 24" width="100%" height="100%"><path fill="currentColor" d="${ICONS[this.getAttribute("icon")] || ""}"/></svg>`;
     }
   });
   customElements.define("ha-card", class extends HTMLElement {

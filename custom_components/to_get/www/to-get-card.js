@@ -5,7 +5,7 @@
  * Colours come from the Home Assistant theme; set --to-get-accent to change the accent (or --tg-accent on ha-card,
  * from card-mod). The count strip also takes --tg-glow, --tg-name-size, --tg-name-transform and --tg-name-spacing.
  */
-const TG_VERSION = "0.1.0";
+const TG_VERSION = "0.1.1";
 
 const TG_OFFLINE = "Couldn't reach Home Assistant. Check the connection and try again.";
 const TG_STARTING = "Waiting for To Get to load in Home Assistant…";
@@ -794,10 +794,18 @@ class ToGetCard extends HTMLElement {
       .strip .main { color: var(--accent); --mdc-icon-size: 22px; justify-self: center; }
       .strip .name { font-size: var(--tg-name-size, 12px); color: var(--muted); text-transform: var(--tg-name-transform, none); letter-spacing: var(--tg-name-spacing, normal);
         white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-      .strip .value { font-size: 15px; font-weight: 700; color: var(--accent); text-shadow: var(--tg-glow, none); white-space: nowrap; }
+      .strip .value { font-size: 15px; font-weight: 700; color: var(--accent); text-shadow: var(--tg-glow, none); white-space: nowrap;
+        overflow: hidden; text-overflow: ellipsis; }
       .strip .value.quiet { color: var(--muted); font-weight: 500; text-shadow: none; }
       .strip .sub { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 1px; }
       .strip .chev { color: var(--muted); --mdc-icon-size: 20px; }
+      /* A narrow strip (a picture-elements overlay, say): no arrow, so what it says has the room. It's still a link. */
+      @container (max-width: 240px) {
+        .strip { grid-template-columns: 24px minmax(0, 1fr); padding: 8px 10px; min-height: 0; }
+        .strip .main { --mdc-icon-size: 20px; }
+        .strip .chev { display: none; }
+        .strip .value { font-size: 14px; }
+      }
       @media (prefers-reduced-motion: reduce) { .item.flash { animation: none; } .box { transition: none; } }
     `;
   }

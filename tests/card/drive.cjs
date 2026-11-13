@@ -323,6 +323,11 @@ async function main() {
     await p.keyboard.press("Enter");
     check("... and so does Enter", await p.evaluate(() => location.pathname === "/lovelace/lists"));
 
+    await open("theme=navy&view=count&w=172&navigation_path=/lovelace/lists", 260, 200, "empty");
+    check("a narrow strip drops the arrow and fits what it says", !(await p.evaluate(() => !!window.R().querySelector(".chev")?.offsetWidth))
+      && (await p.evaluate(() => { const v = window.R().querySelector(".value"); return v.scrollWidth <= v.clientWidth && v.textContent === "Nothing to get"; })));
+    check("... and is still a link", (await attr(".strip", "role")) === "link");
+
     await open("theme=dark&view=count", 440, 200, "empty");
     check("nothing to get says so, with no link", (await text(".value")) === "Nothing to get" && !(await has(".chev")) && (await attr(".strip", "role")) === null);
     check("no page errors", !errors.length, errors.join(" | "));
