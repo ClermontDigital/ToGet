@@ -1,0 +1,120 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>To Get card harness</title>
+<style>
+  html[data-theme="dark"], html[data-theme="navy"] { --primary-text-color: #e1e1e1; --secondary-text-color: #9b9b9b; --card-background-color: #1c1c1c;
+    --divider-color: rgba(225,225,225,.14); --primary-color: #03a9f4; --page: #111; --error-color: #ef5350; }
+  html[data-theme="light"] { --primary-text-color: #212121; --secondary-text-color: #6b6b6b; --card-background-color: #fff;
+    --divider-color: rgba(0,0,0,.14); --primary-color: #0288d1; --page: #f4f4f4; --error-color: #c62828; }
+  html[data-theme="navy"] { --page: #05090d; --primary-text-color: #e0fbff; --secondary-text-color: rgba(224,251,255,.6); }
+  body { margin: 0; padding: 24px; background: var(--page); font-family: Roboto, "Helvetica Neue", Arial, sans-serif; }
+  #wrap { width: var(--w, 440px); }
+</style>
+</head>
+<body>
+<div id="wrap"></div>
+<script>
+  // A stand-in for Home Assistant's frontend: theme variables, ha-card, ha-icon and a `hass` object.
+  const q = new URLSearchParams(location.search);
+  document.documentElement.dataset.theme = q.get("theme") || "dark";
+  document.getElementById("wrap").style.setProperty("--w", (q.get("w") || 440) + "px");
+  // Material Design Icons paths (Apache 2.0), for the icons the card uses.
+  const ICONS = {
+    "mdi:cart-outline": "M17,18A2,2 0 0,1 19,20A2,2 0 0,1 17,22C15.89,22 15,21.1 15,20C15,18.89 15.89,18 17,18M1,2H4.27L5.21,4H20A1,1 0 0,1 21,5C21,5.17 20.95,5.34 20.88,5.5L17.3,11.97C16.96,12.58 16.3,13 15.55,13H8.1L7.2,14.63L7.17,14.75A0.25,0.25 0 0,0 7.42,15H19V17H7C5.89,17 5,16.1 5,15C5,14.65 5.09,14.32 5.24,14.04L6.6,11.59L3,4H1V2M7,18A2,2 0 0,1 9,20A2,2 0 0,1 7,22C5.89,22 5,21.1 5,20C5,18.89 5.89,18 7,18M16,11L18.78,6H6.14L8.5,11H16Z",
+    "mdi:chevron-right": "M8.59,16.58L13.17,12L8.59,7.41L10,6L16,12L10,18L8.59,16.58Z",
+    "mdi:chevron-down": "M7.41,8.58L12,13.17L16.59,8.58L18,10L12,16L6,10L7.41,8.58Z",
+  };
+  customElements.define("ha-icon", class extends HTMLElement {
+    static get observedAttributes() { return ["icon"]; }
+    connectedCallback() { this.draw(); }
+    attributeChangedCallback() { this.draw(); }
+    draw() {
+      const size = "var(--mdc-icon-size, 24px)";
+      this.style.cssText = `display:inline-flex;width:${size};height:${size}`;
+      this.innerHTML = `<svg viewBox="0 0 24 24" width="100%" height="100%"><path fill="currentColor" d="${ICONS[this.getAttribute("icon")] || ""}"/></svg>`;
+    }
+  });
+  customElements.define("ha-card", class extends HTMLElement {
+    // Styled from its own shadow root, with the same theme variables, as Home Assistant's ha-card is,
+    // so card-mod's `ha-card { ... }` from the card around it wins as it does on a dashboard.
+    constructor() {
+      super();
+      this.attachShadow({ mode: "open" }).innerHTML = "<style>:host{display:block;background:var(--ha-card-background,var(--card-background-color));"
+        + "border-radius:var(--ha-card-border-radius,12px);border:var(--ha-card-border-width,1px) solid var(--ha-card-border-color,var(--divider-color));"
+        + "box-shadow:var(--ha-card-box-shadow,none);color:var(--primary-text-color)}</style><slot></slot>";
+    }
+  });
+  const post = async (msg, quiet) => {
+    const r = await fetch("/ws" + (quiet ? "?quiet" : ""), { method: "POST", body: JSON.stringify(msg) });
+    const j = await r.json();
+    if (!r.ok) throw j;
+    return j;
+  };
+  const READS = ["lists", "subscribe", "subscribe_summary"];
+  window.subs = [];
+  window.listeners = { ready: [], disconnected: [] };
+  window.offline = false;   // set true to make every call fail the way a dropped connection does
+  // What a subscription sends after a change: the same command asked again, and its first event passed on.
+  window.push = async () => {
+    for (const s of [...window.subs]) {
+      try { const j = await post(s.msg, true); s.cb(j.events[0]); } catch (_) { /* not loaded */ }
+    }
+  };
+  // A change from another device: made quietly, then pushed to the open card as Home Assistant would.
+  window.elsewhere = async (msg) => { const j = await post(msg, true); await window.push(); return j.result; };
+  window.makeHass = () => ({
+    connected: true,
+    config: { state: "RUNNING" },
+    callWS: async (msg) => {
+      if (window.offline) throw 3;   // home-assistant-js-websocket rejects with ERR_CONNECTION_LOST
+      const j = await post(msg);
+      // Home Assistant sends the subscription's event before the answer to the change.
+      if (!READS.includes(msg.type.split("/")[1])) await window.push();
+      return j.result;
+    },
+    connection: {
+      subscribeMessage: async (cb, msg) => {
+        if (window.offline) throw 3;
+        const j = await post(msg);
+        const sub = { cb, msg };
+        window.subs.push(sub);
+        cb(j.events[0]);
+        return async () => { window.subs = window.subs.filter((s) => s !== sub); };
+      },
+      addEventListener: (type, f) => window.listeners[type]?.push(f),
+      removeEventListener: (type, f) => { if (window.listeners[type]) window.listeners[type] = window.listeners[type].filter((g) => g !== f); },
+    },
+  });
+  // A reconnect: the subscriptions are gone, then the connection says it's ready again.
+  window.reconnect = () => {
+    window.subs = [];
+    window.listeners.disconnected.forEach((f) => f());
+    window.listeners.ready.forEach((f) => f());
+  };
+  // The real dashboards wrap the card with card-mod: a dark navy gradient with a coloured left border.
+  window.NAVY = "ha-card { --tg-accent: #3DDC97; --tg-glow: 0 0 8px currentColor; --tg-name-size: 10px; --tg-name-transform: uppercase; --tg-name-spacing: 1px; "
+    + "background: linear-gradient(135deg, rgba(2,12,20,0.95) 0%, rgba(0,32,48,0.92) 100%); "
+    + "border: 1px solid rgba(61,220,151,0.45); border-left: 3px solid #3DDC97; border-radius: 4px; "
+    + "box-shadow: 0 0 14px rgba(61,220,151,0.15), inset 0 0 18px rgba(61,220,151,0.05); }";
+</script>
+<script type="module">
+  await import("/card.js?" + Date.now());
+  const card = document.createElement("to-get-card");
+  const config = {};
+  for (const key of ["view", "title", "entry_id", "navigation_path"]) if (q.get(key)) config[key] = q.get(key);
+  if (q.get("hide_title")) config.hide_title = true;
+  if (q.get("hide_got")) config.hide_got = true;
+  card.setConfig(config);
+  document.getElementById("wrap").appendChild(card);
+  // card-mod puts an element of its own inside the card as the dashboard loads, before the first draw.
+  const mod = Object.assign(document.createElement("card-mod"), { id: "from-card-mod" });
+  if (q.get("theme") === "navy") mod.innerHTML = `<style>${window.NAVY}</style>`;
+  card.shadowRoot.appendChild(mod);
+  card.hass = window.makeHass();
+  window.card = card;
+</script>
+</body>
+</html>

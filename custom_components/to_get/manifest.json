@@ -1,0 +1,23 @@
+{
+  "domain": "to_get",
+  "name": "To Get",
+  "after_dependencies": [
+    "frontend",
+    "lovelace"
+  ],
+  "codeowners": [
+    "@ClermontDigital"
+  ],
+  "config_flow": true,
+  "dependencies": [
+    "http",
+    "todo",
+    "websocket_api"
+  ],
+  "documentation": "https://github.com/ClermontDigital/ToGet",
+  "integration_type": "service",
+  "iot_class": "local_push",
+  "issue_tracker": "https://github.com/ClermontDigital/ToGet/issues",
+  "requirements": [],
+  "version": "0.1.0"
+}

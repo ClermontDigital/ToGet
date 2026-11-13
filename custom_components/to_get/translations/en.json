@@ -1,0 +1,55 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Add a list",
+        "description": "To Get keeps a list of things you need to buy, get or order, and where each one is coming from.",
+        "data": {
+          "name": "Name",
+          "icon": "Icon"
+        },
+        "data_description": {
+          "name": "Shown on the card and used to name the to-do list, such as To get or Hardware.",
+          "icon": "Shown on the card and the to-do list."
+        }
+      }
+    },
+    "error": {
+      "name_required": "Give the list a name.",
+      "name_taken": "There's already a list with that name."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "List",
+        "data": {
+          "icon": "Icon"
+        },
+        "data_description": {
+          "icon": "Shown on the card and the to-do list."
+        }
+      }
+    }
+  },
+  "services": {
+    "add": {
+      "name": "Add",
+      "description": "Put something on the list, with where it's coming from. Something already on the list isn't added twice.",
+      "fields": {
+        "item": {
+          "name": "Item",
+          "description": "What's needed."
+        },
+        "place": {
+          "name": "Place",
+          "description": "Where it's coming from, such as a shop or online. Left out, it's the place it came from last time, if it's been on the list before."
+        },
+        "notes": {
+          "name": "Notes",
+          "description": "Anything else worth knowing, such as a size or a brand."
+        }
+      }
+    }
+  }
+}

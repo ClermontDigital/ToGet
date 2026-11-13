@@ -1,0 +1,145 @@
+"""To Get: a list of things we need to buy, get or order, and where each one is coming from."""
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+
+from homeassistant.components import frontend
+from homeassistant.components.http import StaticPathConfig
+from homeassistant.const import Platform
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers.dispatcher import async_dispatcher_send
+from homeassistant.helpers.typing import ConfigType
+from homeassistant.loader import async_get_integration
+
+from .api import async_register_api
+from .const import CARD_FILENAME, CARD_URL, DOMAIN, SIGNAL_ANY, SIGNAL_UPDATED
+from .services import async_register_services
+from .store import ToGetConfigEntry, ToGetStore
+
+_LOGGER = logging.getLogger(__name__)
+
+PLATFORMS: list[Platform] = [Platform.TODO]
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
+
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
+    async_register_api(hass)
+    async_register_services(hass)
+    return True
+
+
+async def async_setup_entry(hass: HomeAssistant, entry: ToGetConfigEntry) -> bool:
+    store = ToGetStore(hass, entry.entry_id)
+    await store.async_load()
+    entry.runtime_data = store
+    entry.async_on_unload(entry.add_update_listener(_async_options_updated))
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    # Cards already subscribed to this list (it was reloaded) get it again, and the count strips count it.
+    async_dispatcher_send(hass, SIGNAL_UPDATED.format(entry.entry_id))
+    async_dispatcher_send(hass, SIGNAL_ANY)
+    try:
+        await _async_setup_frontend(hass)
+    except Exception:  # noqa: BLE001 - the list works without the card being auto-registered
+        _LOGGER.warning("To Get: card setup failed", exc_info=True)
+    return True
+
+
+async def _async_options_updated(hass: HomeAssistant, entry: ToGetConfigEntry) -> None:
+    """A new icon shows straight away, and a renamed list renames its device."""
+    registry = dr.async_get(hass)
+    for device in dr.async_entries_for_config_entry(registry, entry.entry_id):
+        if device.name != entry.title:
+            registry.async_update_device(device.id, name=entry.title)
+    async_dispatcher_send(hass, SIGNAL_UPDATED.format(entry.entry_id))
+    async_dispatcher_send(hass, SIGNAL_ANY)
+
+
+async def async_unload_entry(hass: HomeAssistant, entry: ToGetConfigEntry) -> bool:
+    ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    if ok:
+        store = entry.runtime_data
+        store.closed = True
+        await store.async_flush()
+        # Open cards on this list hear that it's gone, and the count strips leave it out.
+        async_dispatcher_send(hass, SIGNAL_UPDATED.format(entry.entry_id))
+        async_dispatcher_send(hass, SIGNAL_ANY)
+    return ok
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: ToGetConfigEntry) -> None:
+    """Deleting a list deletes what was on it, and the last one takes the card's dashboard resource with it."""
+    await ToGetStore(hass, entry.entry_id).async_remove()
+    if not hass.config_entries.async_entries(DOMAIN):
+        await _async_remove_resource(hass)
+        hass.data.pop(f"{DOMAIN}_frontend", None)   # so a list added later registers it again
+
+
+async def _async_setup_frontend(hass: HomeAssistant) -> None:
+    """Serve the bundled card and make sure dashboards load it (once per HA run)."""
+    if hass.data.get(f"{DOMAIN}_frontend"):
+        return
+    hass.data[f"{DOMAIN}_frontend"] = True
+
+    card_path = Path(__file__).parent / "www" / CARD_FILENAME
+    if not await hass.async_add_executor_job(card_path.is_file):
+        _LOGGER.warning("To Get: the card's file is missing (%s), so dashboards won't load it", card_path)
+        return
+    try:
+        version = (await async_get_integration(hass, DOMAIN)).version
+    except Exception:  # noqa: BLE001
+        version = None
+    url = f"{CARD_URL}?v={version}" if version else CARD_URL
+    try:
+        await hass.http.async_register_static_paths([StaticPathConfig(CARD_URL, str(card_path), False)])
+    except Exception:  # noqa: BLE001 - already registered after a reload
+        _LOGGER.debug("To Get: card path already registered")
+    if not await _async_register_resource(hass, url):
+        try:
+            frontend.add_extra_js_url(hass, url)
+        except Exception:  # noqa: BLE001 - frontend not loaded (tests, minimal installs)
+            _LOGGER.warning("To Get: couldn't auto-load the card; add %s as a dashboard resource", CARD_URL)
+
+
+async def _async_resources(hass: HomeAssistant):
+    """The storage-mode dashboard resource collection, loaded, or None when there isn't one."""
+    from homeassistant.components.lovelace import LOVELACE_DATA
+
+    resources = getattr(hass.data.get(LOVELACE_DATA), "resources", None)
+    if resources is None or not hasattr(resources, "async_create_item"):
+        return None
+    if hasattr(resources, "loaded") and not resources.loaded:
+        await resources.async_load()
+        resources.loaded = True   # as Home Assistant's own loading does, so it isn't loaded twice
+    return resources
+
+
+async def _async_remove_resource(hass: HomeAssistant) -> None:
+    try:
+        resources = await _async_resources(hass)
+        for item in list(resources.async_items()) if resources else []:
+            if item.get("url", "").split("?")[0] == CARD_URL:
+                await resources.async_delete_item(item["id"])
+    except Exception:  # noqa: BLE001 - a left-over resource is harmless
+        _LOGGER.debug("To Get: couldn't remove the card resource", exc_info=True)
+
+
+async def _async_register_resource(hass: HomeAssistant, url: str) -> bool:
+    """Add or refresh the Lovelace resource so storage-mode dashboards load the card."""
+    try:
+        resources = await _async_resources(hass)
+        if resources is None:
+            return False
+        base = url.split("?")[0]
+        for item in resources.async_items():
+            existing = item.get("url", "")
+            if existing.split("?")[0] == base:
+                if existing != url:
+                    await resources.async_update_item(item["id"], {"url": url})
+                return True
+        await resources.async_create_item({"res_type": "module", "url": url})
+        return True
+    except Exception:  # noqa: BLE001 - the card can still be added by hand
+        _LOGGER.warning("To Get: couldn't register the card resource", exc_info=True)
+        return False

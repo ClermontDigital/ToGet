@@ -1,0 +1,19 @@
+add:
+  target:
+    entity:
+      domain: todo
+      integration: to_get
+  fields:
+    item:
+      required: true
+      example: Silicone
+      selector:
+        text:
+    place:
+      example: Bunnings
+      selector:
+        text:
+    notes:
+      selector:
+        text:
+          multiline: true
